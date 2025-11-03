@@ -7,13 +7,13 @@ terraform {
 
   }
 
-  backend "s3" {
+  /*backend "s3" {
     bucket         = "pearson-terraform-state-9825-3438-5511"
     key            = "dev/terraform.tfstate"
     region         = "eu-central-1"
     encrypt        = true
     dynamodb_table = "terraform-lock"
-  }
+  }*/
 }
 
 provider "aws" {
