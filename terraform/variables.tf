@@ -48,3 +48,19 @@ variable "db_password" {
   type      = string
   sensitive = true
 }
+
+variable "asg_min_size" {
+  type    = number
+  default = 1
+}
+
+variable "asg_max_size" {
+  type    = number
+  default = 3
+}
+
+variable "asg_desired_capacity" {
+  type    = number
+  default = 2
+}
+

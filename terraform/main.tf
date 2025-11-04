@@ -161,7 +161,7 @@ resource "aws_security_group" "rds" {
   }
 }
 
-#ec2 instance
+/*#ec2 instance
 resource "aws_instance" "web" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
@@ -181,7 +181,210 @@ resource "aws_instance" "web" {
   tags = {
     Name = "${var.project_name}-web-server"
   }
+}*/
+
+#autoscalling group + launch template
+resource "aws_launch_template" "web" {
+  name_prefix   = "${var.project_name}-lt-"
+  image_id      = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type
+  key_name      = var.key_name
+
+  vpc_security_group_ids = [aws_security_group.ec2.id]
+
+  user_data = filebase64("${path.module}/../scripts/user_data.sh")
+
+  block_device_mappings {
+    device_name = "/dev/sda1"
+
+    ebs {
+      volume_size = 20
+      volume_type = "gp3"
+      encrypted   = true
+    }
+  }
+  tag_specifications {
+    resource_type = "instance"
+
+    tags = {
+      Name = "${var.project_name}-web-server"
+    }
+  }
 }
+
+#auto scalling group
+resource "aws_autoscaling_group" "web" {
+  name                      = "${var.project_name}-asg"
+  vpc_zone_identifier       = aws_subnet.public[*].id
+  target_group_arns         = [aws_lb_target_group.main.arn]
+  health_check_type         = "ELB"
+  health_check_grace_period = 300
+
+  min_size         = var.asg_min_size
+  max_size         = var.asg_max_size
+  desired_capacity = var.asg_desired_capacity
+
+  launch_template {
+    id      = aws_launch_template.web.id
+    version = "$Latest"
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "${var.project_name}-asg-instance"
+    propagate_at_launch = true
+  }
+
+  tag {
+    key                 = "Project"
+    value               = "Pearson DevOps"
+    propagate_at_launch = true
+  }
+}
+
+#autoscaling policy
+resource "aws_autoscaling_policy" "scale_up" {
+  name                   = "${var.project_name}-scale-up"
+  scaling_adjustment     = 1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = 300
+  autoscaling_group_name = aws_autoscaling_group.web.name
+}
+
+#cloudwatch alarm - high cpu
+resource "aws_cloudwatch_metric_alarm" "cpu_high" {
+  alarm_name          = "${var.project_name}-high-cpu"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = "60"
+  statistic           = "Average"
+  threshold           = "70"
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.web.name
+  }
+
+  alarm_description = "Triggers when CPU exceeds 70%"
+  alarm_actions     = [aws_autoscaling_policy.scale_up.arn]
+}
+
+#auto scaling policy - scale down
+resource "aws_autoscaling_policy" "scale_down" {
+  name                   = "${var.project_name}-scale-down"
+  scaling_adjustment     = -1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = 300
+  autoscaling_group_name = aws_autoscaling_group.web.name
+}
+
+#cloudwatch alarm - low cpu
+resource "aws_cloudwatch_metric_alarm" "cpu_low" {
+  alarm_name          = "${var.project_name}-low-cpu"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = "60"
+  statistic           = "Average"
+  threshold           = "20"
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.web.name
+  }
+  alarm_description = "Triggers when CPU is below 20%"
+  alarm_actions     = [aws_autoscaling_policy.scale_down.arn]
+}
+
+
+
+#Application load balancer
+resource "aws_lb" "main" {
+  name               = "${var.project_name}-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = aws_subnet.public[*].id
+
+  enable_deletion_protection = false
+
+  tags = {
+    Name = "${var.project_name}-alb"
+  }
+}
+
+#Security group for alb
+resource "aws_security_group" "alb" {
+  name        = "${var.project_name}-alb"
+  description = "security group for application load balancer"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "http from anywhere"
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "https from anywhere"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.project_name}-alb-sg"
+  }
+}
+
+#target group
+resource "aws_lb_target_group" "main" {
+  name     = "${var.project_name}-tg"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
+
+  health_check {
+    enabled             = true
+    healthy_threshold   = 2
+    interval            = 30
+    matcher             = "200"
+    path                = "/"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    timeout             = 5
+    unhealthy_threshold = 2
+  }
+
+  tags = {
+    Name = "${var.project_name}-tg"
+  }
+}
+
+#ALB listener
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.main.arn
+  }
+}
+
+
 
 #rds subnet group
 resource "aws_db_subnet_group" "main" {
